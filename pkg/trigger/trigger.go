@@ -3,16 +3,46 @@
 package trigger
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/lib/pq"
 )
+
+type NotificationHandler func(*pq.Listener, <-chan struct{}, time.Duration) bool
+
+type ProblemHandler pq.EventCallbackType
+
+// DBChangeListener is a listener for data changes to tables registered with it.
+type DBChangeListener struct {
+	DBConnectStr          string
+	ChangeHandler         NotificationHandler
+	ProblemHandler        ProblemHandler
+	MinConnectionInterval time.Duration
+	MaxConnectionInterval time.Duration
+	KeepaliveInterval     time.Duration
+	listener              *pq.Listener
+	db                    *sql.DB
+}
+
+// NewDBChangeListener creates a new DBListener.
+func NewDBChangeListener(dbConnectStr string, changeHandler NotificationHandler, problemHandler ProblemHandler, minInterval, maxInterval, keepAliveInterval time.Duration) *DBChangeListener {
+	dbListener := DBChangeListener{
+		DBConnectStr:          dbConnectStr,
+		ChangeHandler:         changeHandler,
+		ProblemHandler:        problemHandler,
+		MinConnectionInterval: minInterval,
+		MaxConnectionInterval: maxInterval,
+		KeepaliveInterval:     keepAliveInterval,
+	}
+
+	dbListener.listener = pq.NewListener(dbConnectStr, minInterval, maxInterval, pq.EventCallbackType(problemHandler))
+
+	return &dbListener
+}
 
 var listenFunc = `CREATE OR REPLACE FUNCTION notify_event() RETURNS TRIGGER AS $$
 
@@ -47,78 +77,78 @@ END;
 
 $$ LANGUAGE plpgsql;`
 
-func waitForNotification(l *pq.Listener, abort <-chan struct{}, checkConnInterval time.Duration) bool {
-	for {
-		select {
-		case n := <-l.Notify:
-			fmt.Println("Received data from channel [", n.Channel, "] :")
-			// Prepare notification payload for pretty print
-			var prettyJSON bytes.Buffer
-			err := json.Indent(&prettyJSON, []byte(n.Extra), "", "\t")
-			if err != nil {
-				fmt.Println("Error processing JSON: ", err)
-				return false
-			}
-			fmt.Println(string(prettyJSON.Bytes()))
-
-			return false
-
-		case <-time.After(checkConnInterval):
-			fmt.Println("Received no events for 90 seconds, checking connection")
-			go func() {
-				l.Ping()
-			}()
-
-			return false
-
-		case <-abort:
-			return true
-		}
+// Init initializes the listener.
+func (l *DBChangeListener) Init() error {
+	db, err := sql.Open("postgres", l.DBConnectStr)
+	if err != nil {
+		return fmt.Errorf("sql open: %w", err)
 	}
+
+	l.db = db
+
+	if err := l.db.Ping(); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+
+	return nil
 }
 
-// StartListening connects to the DB using the connectStr and installs a
-// listener (trigger). It unlocks started when it completes starting, and
-// running when it finishes running.
-func StartListening(connectStr string, started, running *sync.Mutex, abort <-chan struct{}) error {
-	db, err := sql.Open("postgres", connectStr)
+// InstallListener installs a listener function into the DB. Once installed, the
+// listener must be enabled for individual tables to take effect.
+func (l *DBChangeListener) InstallListener() error {
+	db, err := sql.Open("postgres", l.DBConnectStr)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
-	}
-
-	// Install the listener.
-	if err := installListener(db); err != nil {
 		return fmt.Errorf("install listener: %w", err)
 	}
 
-	reportProblem := func(ev pq.ListenerEventType, err error) {
-		if err != nil {
-			fmt.Println(err.Error())
-		}
-	}
-
-	listener := pq.NewListener(connectStr, 10*time.Second, time.Minute, reportProblem)
-
-	running.Lock()
-	started.Unlock()
-
-	for {
-		if waitForNotification(listener, abort, 90*time.Second) {
-			running.Unlock()
-			return nil
-		}
-	}
-}
-
-func installListener(db *sql.DB) error {
 	conn, err := db.Conn(context.Background())
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 
+	defer conn.Close()
+
 	result, err := conn.ExecContext(context.Background(), listenFunc)
 	if err != nil {
 		return fmt.Errorf("install trigger: (%v) %w", result, err)
+	}
+
+	return nil
+}
+
+// Start starts the listener thread.
+func (l *DBChangeListener) Start(started, running *sync.Mutex, abort <-chan struct{}) error {
+	running.Lock()
+	started.Unlock()
+
+	err := l.listener.Listen("events")
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
+	for {
+		if l.ChangeHandler(l.listener, abort, l.KeepaliveInterval) {
+			running.Unlock()
+
+			return nil
+		}
+	}
+}
+
+// RegisterTable adds the table to the list of tables for which the listener is
+// notified when changes occur in the table.
+func (l *DBChangeListener) RegisterTable(table string) error {
+	addTriggerStatement := fmt.Sprintf("CREATE TRIGGER %s_notify_event AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE PROCEDURE notify_event();", table, table)
+
+	conn, err := l.db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("open connection: %w", err)
+	}
+
+	defer conn.Close()
+
+	if _, err = conn.ExecContext(context.Background(), addTriggerStatement); err != nil {
+		return fmt.Errorf("create trigger (%s): %w", addTriggerStatement, err)
 	}
 
 	return nil
