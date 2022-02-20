@@ -90,12 +90,14 @@ func (l *DBChangeListener) Init() error {
 		return fmt.Errorf("db ping: %w", err)
 	}
 
+	l.installListener()
+
 	return nil
 }
 
-// InstallListener installs a listener function into the DB. Once installed, the
+// installListener installs a listener function into the DB. Once installed, the
 // listener must be enabled for individual tables to take effect.
-func (l *DBChangeListener) InstallListener() error {
+func (l *DBChangeListener) installListener() error {
 	db, err := sql.Open("postgres", l.DBConnectStr)
 	if err != nil {
 		return fmt.Errorf("install listener: %w", err)

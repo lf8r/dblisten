@@ -80,9 +80,6 @@ func TestDBListener(t *testing.T) {
 	dbListener := NewDBChangeListener(connectStr, notificationHandler, problemHandler, 10*time.Second, time.Minute, 90*time.Second)
 	assert.NoError(dbListener.Init())
 
-	// Install the listening function in the DB.
-	assert.NoError(dbListener.InstallListener())
-
 	// Start the listener.
 	started := sync.Mutex{}
 	started.Lock()
