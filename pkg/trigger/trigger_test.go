@@ -73,7 +73,7 @@ func changeHandler(n *pq.Notification) bool {
 	return false
 }
 
-func TestDBListenerListenAndNotify(t *testing.T) {
+func TestDBListener(t *testing.T) {
 	assert := require.New(t)
 
 	// dbname=exampledb user=webapp password=webapp
