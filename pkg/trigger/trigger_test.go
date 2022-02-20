@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
@@ -65,9 +66,6 @@ func DrainEvents() []string {
 // changeHandler is called back on changes to the data in any of the registered
 // tables.
 func changeHandler(n *pq.Notification) bool {
-	// nolint
-	fmt.Println("Received data from channel [", n.Channel, "] :")
-
 	AppendEvent(string(n.Extra))
 
 	return false
@@ -107,8 +105,11 @@ func TestDBListener(t *testing.T) {
 	assert.Equal(2, len(recordedEvents))
 
 	for _, event := range recordedEvents {
+		ev := Event{}
+		assert.NoError(jsoniter.Unmarshal([]byte(event), &ev))
+
 		// nolint
-		fmt.Println(event)
+		fmt.Printf("%s\t%s\t%s\n", ev.Table, ev.Action, ev.Data)
 	}
 
 	dbListener.Shutdown()

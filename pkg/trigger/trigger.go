@@ -51,6 +51,12 @@ type DBReconnectStrategy struct {
 	KeepAlive      time.Duration
 }
 
+type Event struct {
+	Table  string
+	Action string
+	Data   map[string]interface{}
+}
+
 // DefaultReconnectStrategy provides a default reconnection strategy as a convenience.
 func DefaultReconnectStrategy() *DBReconnectStrategy {
 	return &DBReconnectStrategy{
