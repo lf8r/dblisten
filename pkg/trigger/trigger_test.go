@@ -73,62 +73,6 @@ func changeHandler(n *pq.Notification) bool {
 	return false
 }
 
-// TestDBListener creates a new DBListener, creates two temporary data tables,
-// adds one row each to each table, and verifies that the listener is notified
-// for both records.
-func TestDBListener(t *testing.T) {
-	assert := require.New(t)
-
-	// dbname=exampledb user=webapp password=webapp
-	connectStr := "dbname=postgres user=postgres host=localhost"
-	abort := make(chan struct{}, 0)
-
-	// Create a new DBChangeListener
-	dbListener := NewDBChangeListener(connectStr, changeHandler, problemHandler, 10*time.Second, time.Minute, 90*time.Second)
-	assert.NoError(dbListener.Init())
-
-	// Start the listener, and wait for it to complete starting.
-	started := sync.Mutex{}
-	started.Lock()
-	running := sync.Mutex{}
-
-	go dbListener.Start(&started, &running, abort)
-	started.Lock()
-
-	// Create a couple of test tables named "test1" and "test2", with the
-	// objective of manipulating some test data.
-	db, err := sql.Open("postgres", dbListener.DBConnectStr)
-	assert.NoError(err)
-	assert.NoError(db.Ping())
-	createTestTables(assert, db)
-
-	defer func() {
-		removeTestTables(assert, db)
-	}()
-
-	// Register these tables with DBListener.
-	assert.NoError(dbListener.RegisterTable("test1"))
-	assert.NoError(dbListener.RegisterTable("test2"))
-
-	// Create a row of data in test1
-	createRow(assert, db, "test1", "subhajit", "dasgupta")
-	// Create a row of data in test2
-	createRow(assert, db, "test1", "chuck", "hudson")
-
-	// Sleep for a bit to allow the notification goroutine to make progress.
-	time.Sleep(100 * time.Millisecond)
-	close(abort)
-	running.Lock()
-
-	recordedEvents := DrainEvents()
-	assert.Equal(2, len(recordedEvents))
-
-	for _, event := range recordedEvents {
-		// nolint
-		fmt.Println(event)
-	}
-}
-
 func TestDBListenerListenAndNotify(t *testing.T) {
 	assert := require.New(t)
 
