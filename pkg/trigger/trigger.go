@@ -12,27 +12,94 @@ import (
 	"github.com/lib/pq"
 )
 
-type NotificationHandler func(*pq.Listener, <-chan struct{}, time.Duration) bool
+type NotificationHandler func(n *pq.Notification) bool
 
-type ProblemHandler pq.EventCallbackType
+type NotificationHandlerEx func(*pq.Listener, <-chan struct{}, time.Duration) bool
+
+type ReconnectProblemHandler pq.EventCallbackType
 
 // DBChangeListener is a listener for data changes to tables registered with it.
 type DBChangeListener struct {
+	sync.Mutex
 	DBConnectStr          string
-	ChangeHandler         NotificationHandler
-	ProblemHandler        ProblemHandler
+	Handler               NotificationHandler
+	ProblemHandler        ReconnectProblemHandler
 	MinConnectionInterval time.Duration
 	MaxConnectionInterval time.Duration
 	KeepaliveInterval     time.Duration
-	listener              *pq.Listener
-	db                    *sql.DB
+
+	// Internal state.
+	listener *pq.Listener
+	db       *sql.DB
+	abort    chan struct{}
+	running  *sync.Mutex
+}
+
+// defaultReconnectFailureHandler is the default failure handler when the
+// listener fails to reconnect to the DB.
+func defaultReconnectFailureHandler(ev pq.ListenerEventType, err error) {
+	if err != nil {
+		// nolint
+		fmt.Println(err.Error())
+	}
+}
+
+type ReconnectionStrategy struct {
+	FailureHandler ReconnectProblemHandler
+	MinInterval    time.Duration
+	MaxInterval    time.Duration
+	KeepAlive      time.Duration
+}
+
+func DefaultReconnectStrategy() *ReconnectionStrategy {
+	return &ReconnectionStrategy{
+		FailureHandler: defaultReconnectFailureHandler,
+		MinInterval:    10 * time.Second,
+		MaxInterval:    time.Minute,
+		KeepAlive:      90 * time.Second,
+	}
+}
+
+func ListenAndNotify(dbConnectStr string, notificationHandler NotificationHandler, tables ...string) (*DBChangeListener, error) {
+	return ListenAndNotifyWithReconnectStrategy(dbConnectStr, notificationHandler, DefaultReconnectStrategy(), tables...)
+}
+
+func ListenAndNotifyWithReconnectStrategy(dbConnectStr string, notificationHandler NotificationHandler, reconnectStrategy *ReconnectionStrategy, tables ...string) (*DBChangeListener, error) {
+	dbListener := NewDBChangeListener(dbConnectStr,
+		notificationHandler,
+		reconnectStrategy.FailureHandler,
+		reconnectStrategy.MinInterval,
+		reconnectStrategy.MaxInterval, reconnectStrategy.KeepAlive)
+
+	// Init the listener.
+	if err := dbListener.Init(); err != nil {
+		return nil, fmt.Errorf("init: %w", err)
+	}
+
+	// Start the listener, and wait for it to complete starting.
+	started := sync.Mutex{}
+	started.Lock()
+	running := sync.Mutex{}
+
+	abort := make(chan struct{}, 0)
+	go dbListener.Start(&started, &running, abort)
+	started.Lock()
+
+	for _, table := range tables {
+		dbListener.RegisterTable(table)
+	}
+
+	dbListener.running = &running
+	dbListener.abort = abort
+
+	return dbListener, nil
 }
 
 // NewDBChangeListener creates a new DBListener.
-func NewDBChangeListener(dbConnectStr string, changeHandler NotificationHandler, problemHandler ProblemHandler, minInterval, maxInterval, keepAliveInterval time.Duration) *DBChangeListener {
+func NewDBChangeListener(dbConnectStr string, notificationHandler NotificationHandler, problemHandler ReconnectProblemHandler, minInterval, maxInterval, keepAliveInterval time.Duration) *DBChangeListener {
 	dbListener := DBChangeListener{
 		DBConnectStr:          dbConnectStr,
-		ChangeHandler:         changeHandler,
+		Handler:               notificationHandler,
 		ProblemHandler:        problemHandler,
 		MinConnectionInterval: minInterval,
 		MaxConnectionInterval: maxInterval,
@@ -129,12 +196,17 @@ func (l *DBChangeListener) Start(started, running *sync.Mutex, abort <-chan stru
 	}
 
 	for {
-		if l.ChangeHandler(l.listener, abort, l.KeepaliveInterval) {
+		if l.defaultNotificationHandler(l.listener, abort, l.KeepaliveInterval) {
 			running.Unlock()
 
 			return nil
 		}
 	}
+}
+
+func (l *DBChangeListener) Shutdown() {
+	close(l.abort)
+	l.running.Lock()
 }
 
 // RegisterTable adds the table to the list of tables for which the listener is
@@ -154,4 +226,36 @@ func (l *DBChangeListener) RegisterTable(table string) error {
 	}
 
 	return nil
+}
+
+// defaultNotificationHandler handles notifications arriving from the database.
+// It returns until the abort channel becomes readable. It checks the connection
+// if no notifications are received for checkConnInterval.
+func (l *DBChangeListener) defaultNotificationHandler(pl *pq.Listener, abort <-chan struct{}, checkConnInterval time.Duration) bool {
+	for {
+		select {
+		case n := <-pl.Notify:
+			l.Lock()
+			defer l.Unlock()
+
+			if l.Handler(n) {
+				return true
+			}
+
+			return false
+
+		case <-time.After(checkConnInterval):
+			// nolint
+			fmt.Println("Received no events for 90 seconds, checking connection")
+
+			go func() {
+				pl.Ping()
+			}()
+
+			return false
+
+		case <-abort:
+			return true
+		}
+	}
 }

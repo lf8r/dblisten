@@ -3,10 +3,8 @@
 package trigger
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -17,53 +15,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// problemHandler is called back when there is a problem receiving change
+// notifications.
 func problemHandler(ev pq.ListenerEventType, err error) {
 	if err != nil {
+		// nolint
 		fmt.Println(err.Error())
 	}
 }
 
-var events []string = make([]string, 0)
+var once sync.Once = sync.Once{}
 
-func notificationHandler(l *pq.Listener, abort <-chan struct{}, checkConnInterval time.Duration) bool {
-	for {
-		select {
-		case n := <-l.Notify:
-			// nolint
-			fmt.Println("Received data from channel [", n.Channel, "] :")
+type receivedEvents struct {
+	sync.Mutex
+	events []string
+}
 
-			events = append(events, string(n.Extra))
+var events receivedEvents
 
-			// Prepare notification payload for pretty print
-			var prettyJSON bytes.Buffer
+func AppendEvent(event string) {
+	once.Do(func() {
+		events = receivedEvents{}
+	})
 
-			err := json.Indent(&prettyJSON, []byte(n.Extra), "", "\t")
-			if err != nil {
-				// nolint
-				fmt.Println("Error processing JSON: ", err)
+	events.Lock()
+	defer events.Unlock()
 
-				return false
-			}
+	events.events = append(events.events, event)
+}
 
-			// nolint
-			fmt.Println(string(prettyJSON.Bytes()))
+func DrainEvents() []string {
+	once.Do(func() {
+		events = receivedEvents{}
+	})
 
-			return false
+	events.Lock()
+	defer events.Unlock()
 
-		case <-time.After(checkConnInterval):
-			// nolint
-			fmt.Println("Received no events for 90 seconds, checking connection")
+	ret := make([]string, len(events.events))
+	copy(ret, events.events)
 
-			go func() {
-				l.Ping()
-			}()
+	events.events = make([]string, 0)
 
-			return false
+	return ret
+}
 
-		case <-abort:
-			return true
-		}
-	}
+// var events []string = make([]string, 0)
+
+// changeHandler is called back on changes to the data in any of the registered
+// tables.
+func changeHandler(n *pq.Notification) bool {
+	// nolint
+	fmt.Println("Received data from channel [", n.Channel, "] :")
+
+	AppendEvent(string(n.Extra))
+
+	return false
 }
 
 // TestDBListener creates a new DBListener, creates two temporary data tables,
@@ -77,7 +84,7 @@ func TestDBListener(t *testing.T) {
 	abort := make(chan struct{}, 0)
 
 	// Create a new DBChangeListener
-	dbListener := NewDBChangeListener(connectStr, notificationHandler, problemHandler, 10*time.Second, time.Minute, 90*time.Second)
+	dbListener := NewDBChangeListener(connectStr, changeHandler, problemHandler, 10*time.Second, time.Minute, 90*time.Second)
 	assert.NoError(dbListener.Init())
 
 	// Start the listener, and wait for it to complete starting.
@@ -113,12 +120,54 @@ func TestDBListener(t *testing.T) {
 	close(abort)
 	running.Lock()
 
-	for _, event := range events {
+	recordedEvents := DrainEvents()
+	assert.Equal(2, len(recordedEvents))
+
+	for _, event := range recordedEvents {
+		// nolint
+		fmt.Println(event)
+	}
+}
+
+func TestDBListenerListenAndNotify(t *testing.T) {
+	assert := require.New(t)
+
+	// dbname=exampledb user=webapp password=webapp
+	connectStr := "dbname=postgres user=postgres host=localhost"
+
+	// Create a couple of test tables named "test1" and "test2", with the
+	// objective of manipulating some test data.
+	db, err := sql.Open("postgres", connectStr)
+	assert.NoError(err)
+	assert.NoError(db.Ping())
+	createTestTables(assert, db)
+
+	defer func() {
+		removeTestTables(assert, db)
+	}()
+
+	// Create a new DBChangeListener
+	dbListener, err := ListenAndNotify(connectStr, changeHandler, "test1", "test2")
+	assert.NoError(err)
+
+	// Create a row of data in test1
+	createRow(assert, db, "test1", "subhajit", "dasgupta")
+	// Create a row of data in test2
+	createRow(assert, db, "test1", "chuck", "hudson")
+
+	// Yield to allow the notification goroutine to make progress.
+	time.Sleep(100 * time.Millisecond)
+
+	// Check the recorded events.
+	recordedEvents := DrainEvents()
+	assert.Equal(2, len(recordedEvents))
+
+	for _, event := range recordedEvents {
 		// nolint
 		fmt.Println(event)
 	}
 
-	assert.Equal(2, len(events))
+	dbListener.Shutdown()
 }
 
 var createTable1 = `CREATE TABLE if not exists test1(
