@@ -12,11 +12,30 @@ import (
 	"sync"
 	"time"
 
+	jsoniter "github.com/json-iterator/go"
 	"github.com/lib/pq"
 )
 
-type DataChangeHandler func(n *pq.Notification) bool
+// DataChangeType is the type of data change being reported.
+type DataChangeType string
 
+const (
+	Insert DataChangeType = "INSERT"
+	Update DataChangeType = "UPDATE"
+	Delete DataChangeType = "DELETE"
+)
+
+// DataChange is the data change being reported.
+type DataChange struct {
+	Table string
+	Type  DataChangeType
+	Data  string
+}
+
+// DataChangeHandler is a function handling a DataChange.
+type DataChangeHandler func(data *DataChange) bool
+
+// ReconnectFailureHandler is a function handling a DB reconnect failure.
 type ReconnectFailureHandler pq.EventCallbackType
 
 // DBChangeListener is a listener for data changes to tables registered with it.
@@ -52,12 +71,6 @@ type DBReconnectStrategy struct {
 	MinInterval    time.Duration
 	MaxInterval    time.Duration
 	KeepAlive      time.Duration
-}
-
-type Event struct {
-	Table  string
-	Action string
-	Data   map[string]interface{}
 }
 
 // DefaultReconnectStrategy provides a default reconnection strategy as a convenience.
@@ -241,15 +254,17 @@ func (l *DBChangeListener) defaultNotificationHandler(pl *pq.Listener, abort <-c
 			l.Lock()
 			defer l.Unlock()
 
-			if l.Handler(n) {
-				return true
-			}
+			content := []byte(n.Extra)
 
-			return false
+			return l.Handler(&DataChange{
+				Table: jsoniter.Get(content, "table").ToString(),
+				Type:  DataChangeType(jsoniter.Get(content, "action").ToString()),
+				Data:  jsoniter.Get(content, "data").ToString(),
+			})
 
 		case <-time.After(checkConnInterval):
 			// nolint
-			fmt.Println("Received no events for 90 seconds, checking connection")
+			fmt.Println("Received no data changes for 90 seconds, checking connection")
 
 			go func() {
 				pl.Ping()

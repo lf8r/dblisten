@@ -10,24 +10,16 @@ import (
 	"strings"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/lf8r/dblisten/pkg/trigger"
-	"github.com/lib/pq"
 )
 
 const (
 	sleepInterval = 10 * time.Second
 )
 
-func changeHandler(n *pq.Notification) bool {
-	ev := trigger.Event{}
-	if err := jsoniter.Unmarshal([]byte(n.Extra), &ev); err != nil {
-		// nolint
-		fmt.Printf("%s\t%s\t%s\n", ev.Table, ev.Action, ev.Data)
-	} else {
-		// nolint
-		fmt.Printf("%s\n", n.Extra)
-	}
+func changeHandler(dataChange *trigger.DataChange) bool {
+	// nolint
+	fmt.Printf("%s\t%s\t%s\n", dataChange.Table, dataChange.Type, dataChange.Data)
 
 	return false
 }

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
@@ -29,12 +28,12 @@ var once sync.Once = sync.Once{}
 
 type receivedEvents struct {
 	sync.Mutex
-	events []string
+	events []DataChange
 }
 
 var events receivedEvents
 
-func AppendEvent(event string) {
+func AppendEvent(event *DataChange) {
 	once.Do(func() {
 		events = receivedEvents{}
 	})
@@ -42,10 +41,10 @@ func AppendEvent(event string) {
 	events.Lock()
 	defer events.Unlock()
 
-	events.events = append(events.events, event)
+	events.events = append(events.events, *event)
 }
 
-func DrainEvents() []string {
+func DrainEvents() []DataChange {
 	once.Do(func() {
 		events = receivedEvents{}
 	})
@@ -53,10 +52,10 @@ func DrainEvents() []string {
 	events.Lock()
 	defer events.Unlock()
 
-	ret := make([]string, len(events.events))
+	ret := make([]DataChange, len(events.events))
 	copy(ret, events.events)
 
-	events.events = make([]string, 0)
+	events.events = make([]DataChange, 0)
 
 	return ret
 }
@@ -65,8 +64,8 @@ func DrainEvents() []string {
 
 // changeHandler is called back on changes to the data in any of the registered
 // tables.
-func changeHandler(n *pq.Notification) bool {
-	AppendEvent(string(n.Extra))
+func changeHandler(dataChange *DataChange) bool {
+	AppendEvent(dataChange)
 
 	return false
 }
@@ -105,11 +104,8 @@ func TestDBListener(t *testing.T) {
 	assert.Equal(2, len(recordedEvents))
 
 	for _, event := range recordedEvents {
-		ev := Event{}
-		assert.NoError(jsoniter.Unmarshal([]byte(event), &ev))
-
 		// nolint
-		fmt.Printf("%s\t%s\t%s\n", ev.Table, ev.Action, ev.Data)
+		fmt.Printf("%s\t%s\t%s\n", event.Table, event.Type, event.Data)
 	}
 
 	dbListener.Shutdown()

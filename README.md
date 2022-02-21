@@ -22,7 +22,7 @@ Changes are notified as follows (in this example, we're printing notifications t
 
 Build ```dblistener``` by changing to the ```main``` directory and running ```go build```
 
-## Advanced features
+## Functionality
 
 Start listening to data changes in a named set of tables in a DB:
 
@@ -34,20 +34,14 @@ where ```connectStr``` is a "connection string" to connect to a DB (e.g. ```dbna
 
 ```changeHandler``` is a user defined callback function with this signature:
 
-```type DataChangeHandler func(n *pq.Notification) bool```
+```type DataChangeHandler func(data *DataChange) bool```
 
 The main program uses this changeHandler which simply prints any received data-change events to STDOUT.
 
 ```
-func changeHandler(n *pq.Notification) bool {
-	ev := trigger.Event{}
-	if err := jsoniter.Unmarshal([]byte(n.Extra), &ev); err != nil {
-		// nolint
-		fmt.Printf("%s\t%s\t%s\n", ev.Table, ev.Action, ev.Data)
-	} else {
-		// nolint
-		fmt.Printf("%s\n", n.Extra)
-	}
+func changeHandler(dataChange *trigger.DataChange) bool {
+	// nolint
+	fmt.Printf("%s\t%s\t%s\n", dataChange.Table, dataChange.Type, dataChange.Data)
 
 	return false
 }
