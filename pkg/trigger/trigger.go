@@ -1,5 +1,8 @@
-// Copyright (C) Subhajit DasGupta
+// Copyright (C) Subhajit DasGupta 2022
 
+// Package trigger allows the user to install "listeners" for data change events
+// on a set of named tables in a database. For an example of how to use the
+// code, see the TestDBListener unit test.
 package trigger
 
 import (
